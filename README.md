@@ -26,7 +26,7 @@ through Mail's AppleScript interface takes minutes.
 
 ## What it reads
 
-| | |
+| Call | Reads |
 |---|---|
 | `MailStore.search(_:)` | sender, recipient, subject, mailbox, dates, flags, attachments |
 | `MailStore.message(id:)` | one message |
