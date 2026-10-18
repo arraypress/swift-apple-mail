@@ -155,24 +155,103 @@ final class HTMLTests: XCTestCase {
     }
 }
 
+/// A runner that records what it was asked to run and answers as told —
+/// so no test here ever starts osascript, let alone Mail.
+private final class RecordingRunner: @unchecked Sendable {
+    private(set) var calls: [(source: String, arguments: [String])] = []
+    var answer = "changed"
+    var runner: AppleScriptRunner {
+        { [self] source, arguments in
+            calls.append((source, arguments))
+            return answer
+        }
+    }
+}
+
+private struct Refused: Error, Equatable {}
+
 final class ScriptTests: XCTestCase {
 
-    func testAppleScriptLiteralsEscapeInTheRightOrder() {
-        // Backslashes first, then quotes. The other order double-escapes and
-        // turns a subject containing a quotation mark into script.
-        XCTAssertEqual(MailScript.literal(#"say "hi""#), #""say \"hi\"""#)
-        XCTAssertEqual(MailScript.literal(#"back\slash"#), #""back\\slash""#)
-    }
-
-    func testAnAddressThatIsNotOneIsRefused() {
-        // A quotation mark in an address would end the literal and change the
-        // meaning of the script.
-        XCTAssertThrowsError(try MailScript.draft(to: ["not an address"], subject: "s", body: "b"))
-        XCTAssertThrowsError(try MailScript.draft(to: [#"a"@b.invalid"#], subject: "s", body: "b"))
+    func testAnAddressThatIsNotOneIsRefusedBeforeAnythingRuns() {
+        let recorder = RecordingRunner()
+        XCTAssertThrowsError(try MailScript.draft(to: ["not an address"], subject: "s", body: "b",
+                                                  using: recorder.runner))
+        XCTAssertThrowsError(try MailScript.draft(to: [#"a"@b.invalid"#], subject: "s", body: "b",
+                                                  using: recorder.runner))
+        XCTAssertTrue(recorder.calls.isEmpty)
     }
 
     func testOnlyARealMessageIDCanBeMarked() {
-        XCTAssertThrowsError(try MailScript.setFlagged(true, messageID: "1234"))
-        XCTAssertThrowsError(try MailScript.setRead(true, messageID: #"<a"b@c>"#))
+        let recorder = RecordingRunner()
+        XCTAssertThrowsError(try MailScript.setFlagged(true, messageID: "1234", using: recorder.runner))
+        XCTAssertThrowsError(try MailScript.setRead(true, messageID: #"<a"b@c>"#, using: recorder.runner))
+        XCTAssertTrue(recorder.calls.isEmpty)
+    }
+
+    // MARK: The runner seam
+
+    func testADraftGoesThroughTheRunnerWithEveryValueInArgv() throws {
+        let recorder = RecordingRunner()
+        recorder.answer = "drafted"
+        let subject = #"Re: "quotes" \ end tell"#
+        let result = try MailScript.draft(to: ["ada@example.invalid", "bob@example.invalid"],
+                                          cc: ["cy@example.invalid"], subject: subject, body: "hi",
+                                          quoting: "line 1\nline 2", using: recorder.runner)
+        XCTAssertEqual(result, "drafted")
+        XCTAssertEqual(recorder.calls.count, 1)
+        let call = try XCTUnwrap(recorder.calls.first)
+        XCTAssertEqual(call.arguments, [subject, "hi\n\n> line 1\n> line 2", "2",
+                                        "ada@example.invalid", "bob@example.invalid", "cy@example.invalid"])
+        XCTAssertFalse(call.source.contains("ada@example.invalid"), "values never enter the source")
+        XCTAssertFalse(call.source.contains("quotes"), "values never enter the source")
+        XCTAssertTrue(call.source.contains("on run argv"))
+        XCTAssertFalse(call.source.contains(" send"), "the draft script never sends")
+    }
+
+    func testMarkingGoesThroughTheRunner() throws {
+        let recorder = RecordingRunner()
+        try MailScript.setFlagged(true, messageID: "<m1@example.invalid>", using: recorder.runner)
+        try MailScript.setRead(false, messageID: "<m2@example.invalid>", using: recorder.runner)
+        XCTAssertEqual(recorder.calls.map(\.arguments), [["<m1@example.invalid>", "true"],
+                                                         ["<m2@example.invalid>", "false"]])
+        XCTAssertTrue(recorder.calls[0].source.contains("set flagged status of item 1 of matches to newValue"))
+        XCTAssertTrue(recorder.calls[1].source.contains("set read status of item 1 of matches to newValue"))
+        XCTAssertFalse(recorder.calls[0].source.contains("m1@example"))
+    }
+
+    func testMarkingAMessageMailDoesNotHaveIsAnError() {
+        let recorder = RecordingRunner()
+        recorder.answer = "notfound"
+        XCTAssertThrowsError(try MailScript.setRead(true, messageID: "<gone@example.invalid>",
+                                                   using: recorder.runner)) {
+            XCTAssertEqual($0 as? MailError, .scriptFailed("Mail has no message with that Message-ID"))
+        }
+    }
+
+    func testTheRunnersOwnErrorPassesThroughUnchanged() {
+        XCTAssertThrowsError(try MailScript.draft(to: ["a@b.invalid"], subject: "s", body: "b",
+                                                  using: { _, _ in throw Refused() })) {
+            XCTAssertEqual($0 as? Refused, Refused())
+        }
+    }
+
+    /// The scripts compile — checked with osacompile, which reads Mail's
+    /// dictionary from its bundle and sends it nothing.
+    func testTheScriptsCompile() throws {
+        for (name, source) in [("draft", MailScript.Scripts.draft), ("flag", MailScript.Scripts.flag),
+                               ("read", MailScript.Scripts.read)] {
+            let folder = FileManager.default.temporaryDirectory
+            let input = folder.appendingPathComponent("mailscript-\(name)-\(UUID().uuidString).applescript")
+            let output = input.deletingPathExtension().appendingPathExtension("scpt")
+            try source.write(to: input, atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(at: input); try? FileManager.default.removeItem(at: output) }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osacompile")
+            process.arguments = ["-o", output.path, input.path]
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0, "\(name) does not compile")
+        }
     }
 }

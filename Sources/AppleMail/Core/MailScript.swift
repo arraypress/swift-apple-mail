@@ -9,6 +9,16 @@
 
 import Foundation
 
+/// Runs AppleScript: the script's source, and the values it reads from `argv`
+/// (`on run argv`), returning what the script printed.
+///
+/// The library does not run osascript itself. A caller passes the runner —
+/// in the fleet, CLIKit's `OSAScript.run`, which has a hard timeout, reads
+/// both pipes together and says whether a failure may have acted — so the
+/// way scripts are run is one shared piece of code, not a copy here. Errors
+/// the runner throws pass through unchanged.
+public typealias AppleScriptRunner = @Sendable (_ source: String, _ arguments: [String]) throws -> String
+
 /// Asking Mail.app to do something.
 ///
 /// **Nothing in this library writes to Mail's index.** The schema is Apple's,
@@ -19,9 +29,13 @@ import Foundation
 /// cannot send, delete or move, because those are the operations whose
 /// mistakes cannot be taken back.
 ///
+/// **Every value goes in as `argv`, never into the script's source.** A
+/// subject with a quote, a backslash or `end tell` in it is text, and an
+/// escaping slip would make it code. The scripts are constants.
+///
 /// Requires Automation permission for Mail, which macOS asks for once. Until
-/// it is granted every call here fails with ``MailError/scriptFailed(_:)`` and
-/// the read side is unaffected.
+/// it is granted every call here fails with the runner's error and the read
+/// side is unaffected.
 public enum MailScript {
 
     /// Whether this Mac can be asked at all.
@@ -45,16 +59,26 @@ public enum MailScript {
     ///   - subject: The subject line.
     ///   - body: The message text.
     ///   - quoting: Text to include below the new message, quoted with `>`.
+    ///   - runner: Runs the script.
     @discardableResult
     public static func draft(
         to: [String],
         cc: [String] = [],
         subject: String,
         body: String,
-        quoting: String? = nil
+        quoting: String? = nil,
+        using runner: AppleScriptRunner
     ) throws -> String {
+        try runner(Scripts.draft, draftArguments(to: to, cc: cc, subject: subject, body: body, quoting: quoting))
+    }
+
+    /// The draft script's `argv`: subject, content, how many `to`, then the
+    /// `to` addresses, then the `cc` addresses.
+    static func draftArguments(
+        to: [String], cc: [String], subject: String, body: String, quoting: String?
+    ) throws -> [String] {
         for address in to + cc {
-            guard address.contains("@"), !address.contains("\"") else {
+            guard address.contains("@"), !address.contains("\""), !address.contains("\n") else {
                 throw MailError.scriptFailed("\(address) is not an email address")
             }
         }
@@ -67,30 +91,7 @@ public enum MailScript {
                 .joined(separator: "\n")
             content += "\n\n" + quoted
         }
-
-        var script = """
-            tell application "Mail"
-                set theDraft to make new outgoing message with properties \
-            {subject:\(literal(subject)), content:\(literal(content)), visible:true}
-                tell theDraft
-
-            """
-        for address in to {
-            script += "        make new to recipient at end of to recipients "
-                + "with properties {address:\(literal(address))}\n"
-        }
-        for address in cc {
-            script += "        make new cc recipient at end of cc recipients "
-                + "with properties {address:\(literal(address))}\n"
-        }
-        script += """
-                end tell
-                activate
-                return "drafted"
-            end tell
-            """
-
-        return try run(script)
+        return [subject, content, String(to.count)] + to + cc
     }
 
     // MARK: - Marking
@@ -98,13 +99,13 @@ public enum MailScript {
     /// Flags or unflags a message, found by its `Message-ID` header.
     ///
     /// Reversible, which is the whole reason it is here and `delete` is not.
-    public static func setFlagged(_ flagged: Bool, messageID: String) throws {
-        try mark(messageID: messageID, property: "flagged status", value: flagged ? "true" : "false")
+    public static func setFlagged(_ flagged: Bool, messageID: String, using runner: AppleScriptRunner) throws {
+        try mark(Scripts.flag, messageID: messageID, value: flagged, using: runner)
     }
 
     /// Marks a message read or unread.
-    public static func setRead(_ read: Bool, messageID: String) throws {
-        try mark(messageID: messageID, property: "read status", value: read ? "true" : "false")
+    public static func setRead(_ read: Bool, messageID: String, using runner: AppleScriptRunner) throws {
+        try mark(Scripts.read, messageID: messageID, value: read, using: runner)
     }
 
     /// Sets one boolean property on the message with this header.
@@ -113,91 +114,81 @@ public enum MailScript {
     /// turn. Addressing by the RFC header rather than by position is the point:
     /// `message 3 of mailbox 2` means something different the moment mail
     /// arrives, and this is somebody's real mailbox.
-    private static func mark(messageID: String, property: String, value: String) throws {
+    private static func mark(_ script: String, messageID: String, value: Bool,
+                             using runner: AppleScriptRunner) throws {
         guard messageID.hasPrefix("<"), messageID.hasSuffix(">"), !messageID.contains("\"") else {
             throw MailError.scriptFailed("\(messageID) is not a Message-ID")
         }
-
-        let script = """
-            tell application "Mail"
-                set found to false
-                repeat with anAccount in accounts
-                    repeat with aMailbox in mailboxes of anAccount
-                        try
-                            set matches to (messages of aMailbox whose message id is \(literal(messageID)))
-                            if (count of matches) > 0 then
-                                set \(property) of item 1 of matches to \(value)
-                                set found to true
-                                exit repeat
-                            end if
-                        end try
-                    end repeat
-                    if found then exit repeat
-                end repeat
-                if found then
-                    return "changed"
-                else
-                    return "notfound"
-                end if
-            end tell
-            """
-
-        let result = try run(script)
-        guard result != "notfound" else {
+        let result = try runner(script, [messageID, value ? "true" : "false"])
+        guard result.trimmingCharacters(in: .whitespacesAndNewlines) != "notfound" else {
             throw MailError.scriptFailed("Mail has no message with that Message-ID")
         }
     }
 
-    // MARK: - Internals
+    // MARK: - Scripts
 
-    /// An AppleScript string literal.
-    ///
-    /// Backslashes first, then quotes — the other order double-escapes and
-    /// turns a subject containing a quotation mark into a syntax error, or
-    /// worse, into script.
-    static func literal(_ value: String) -> String {
-        let escaped = value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return "\"\(escaped)\""
-    }
+    /// The scripts, as constants. Values arrive in `argv`.
+    enum Scripts {
 
-    /// Runs a script, capturing both streams.
-    private static func run(_ script: String) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
+        /// `argv`: subject, content, count of `to`, the `to` addresses, the
+        /// `cc` addresses.
+        static let draft = """
+            on run argv
+                set theSubject to item 1 of argv
+                set theContent to item 2 of argv
+                set toCount to (item 3 of argv) as integer
+                tell application "Mail"
+                    set theDraft to make new outgoing message with properties \
+            {subject:theSubject, content:theContent, visible:true}
+                    tell theDraft
+                        repeat with i from 4 to (3 + toCount)
+                            make new to recipient at end of to recipients with properties {address:(item i of argv)}
+                        end repeat
+                        repeat with i from (4 + toCount) to (count of argv)
+                            make new cc recipient at end of cc recipients with properties {address:(item i of argv)}
+                        end repeat
+                    end tell
+                    activate
+                    return "drafted"
+                end tell
+            end run
+            """
 
-        let out = Pipe()
-        let err = Pipe()
-        process.standardOutput = out
-        process.standardError = err
+        /// `argv`: Message-ID, `true` or `false`.
+        static let flag = markScript(property: "flagged status")
 
-        do {
-            try process.run()
-        } catch {
-            throw MailError.scriptFailed("could not run osascript: \(error.localizedDescription)")
+        /// `argv`: Message-ID, `true` or `false`.
+        static let read = markScript(property: "read status")
+
+        /// The property name is one of two constants above, never a value.
+        private static func markScript(property: String) -> String {
+            """
+            on run argv
+                set theID to item 1 of argv
+                set newValue to ((item 2 of argv) is "true")
+                tell application "Mail"
+                    set found to false
+                    repeat with anAccount in accounts
+                        repeat with aMailbox in mailboxes of anAccount
+                            try
+                                set matches to (messages of aMailbox whose message id is theID)
+                                if (count of matches) > 0 then
+                                    set \(property) of item 1 of matches to newValue
+                                    set found to true
+                                    exit repeat
+                                end if
+                            end try
+                        end repeat
+                        if found then exit repeat
+                    end repeat
+                    if found then
+                        return "changed"
+                    else
+                        return "notfound"
+                    end if
+                end tell
+            end run
+            """
         }
-
-        // Read before waiting: a full pipe blocks the child for ever, and an
-        // AppleScript error is easily bigger than the buffer.
-        let output = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let failure = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            // -1743 is the one worth naming: it means the user has not granted
-            // Automation permission, and no amount of retrying will change it.
-            if failure.contains("-1743") || failure.lowercased().contains("not authori") {
-                throw MailError.scriptFailed(
-                    "not allowed to control Mail — System Settings ▸ Privacy & Security ▸ "
-                        + "Automation, then allow your terminal to control Mail"
-                )
-            }
-            throw MailError.scriptFailed(failure.isEmpty ? "osascript failed" : failure)
-        }
-        return output
     }
 }

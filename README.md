@@ -53,6 +53,20 @@ Changing anything goes through Mail itself, over AppleScript, and the surface
 is deliberately narrow: compose a draft, flag a message, mark it read. It
 **cannot send, delete or move**.
 
+**You pass the thing that runs AppleScript** (0.2.0). Every `MailScript` call
+takes `using runner: AppleScriptRunner` — `(source, arguments) throws -> String`
+— and the library no longer starts osascript itself. In the fleet that runner is
+CLIKit's `OSAScript.run`, which has a hard timeout, reads stdout and stderr
+together, and says whether a failure may already have acted:
+
+```swift
+try MailScript.draft(to: ["ada@example.com"], subject: "Hi", body: "…",
+                     using: { try OSAScript.run($0, arguments: $1) })
+```
+
+The scripts are constants; every value — subject, body, addresses, the
+Message-ID — reaches them as `argv`, never pasted into the source.
+
 ## Requirements
 
 macOS 14+, and **Full Disk Access** for whatever runs it. Mail's data is in a
@@ -109,7 +123,7 @@ delegate to. The index holds envelopes; bodies are files.
 ## Installation
 
 ```swift
-.package(url: "https://github.com/arraypress/swift-apple-mail.git", from: "0.1.0")
+.package(url: "https://github.com/arraypress/swift-apple-mail.git", from: "0.2.0")
 ```
 
 ## Licence
