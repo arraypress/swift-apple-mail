@@ -150,7 +150,7 @@ public final class MailStore {
         try run(
             "select ROWID, url, total_count, unread_count from mailboxes order by url"
         ) { row in
-            guard let url = row.text(1) else { return }
+            guard let url = row[1].decodedString else { return }
             boxes.append(Mailbox(
                 id: row.integer(0),
                 url: url,
@@ -184,9 +184,9 @@ public final class MailStore {
 
         var counts: [SenderCount] = []
         try run(sql, values) { row in
-            guard let address = row.text(0) else { return }
+            guard let address = row[0].decodedString else { return }
             counts.append(SenderCount(
-                sender: Address(address: address, name: row.text(1)),
+                sender: Address(address: address, name: row[1].decodedString),
                 messages: Int(row.integer(2)),
                 latest: Date(timeIntervalSince1970: TimeInterval(row.integer(3)))
             ))
@@ -204,7 +204,7 @@ public final class MailStore {
             "select name from attachments where message = ? order by ROWID",
             [.integer(messageID)]
         ) { row in
-            if let name = row.text(0), !name.isEmpty { names.append(name) }
+            if let name = row[0].nonEmptyString { names.append(name) }
         }
         return names
     }
@@ -239,12 +239,12 @@ public final class MailStore {
     private static func message(from row: SQLiteRow) -> Message {
         Message(
             id: row.integer(0),
-            messageID: row.text(1),
-            subject: row.text(2) ?? "",
-            sender: Address(address: row.text(3) ?? "", name: row.text(4)),
+            messageID: row[1].decodedString,
+            subject: row[2].decodedString ?? "",
+            sender: Address(address: row[3].decodedString ?? "", name: row[4].decodedString),
             sentAt: Date(timeIntervalSince1970: TimeInterval(row.integer(5))),
             receivedAt: Date(timeIntervalSince1970: TimeInterval(row.integer(6))),
-            mailbox: row.text(7).map { Mailbox.split($0).name } ?? "",
+            mailbox: row[7].decodedString.map { Mailbox.split($0).name } ?? "",
             conversationID: row.integer(8),
             isRead: row.integer(9) != 0,
             isFlagged: row.integer(10) != 0,
@@ -268,10 +268,10 @@ public final class MailStore {
             from recipients r join addresses a on a.ROWID = r.address
             where r.message in (\(holes)) order by r.position
             """, values) { row in
-            guard let address = row.text(1) else { return }
+            guard let address = row[1].decodedString else { return }
             let kind = RecipientKind(rawValue: Int(row.integer(3))) ?? .to
             recipients[row.integer(0), default: []].append(Recipient(
-                address: Address(address: address, name: row.text(2)), kind: kind
+                address: Address(address: address, name: row[2].decodedString), kind: kind
             ))
         }
 
@@ -280,7 +280,7 @@ public final class MailStore {
             "select message, name from attachments where message in (\(holes)) order by ROWID",
             values
         ) { row in
-            guard let name = row.text(1), !name.isEmpty else { return }
+            guard let name = row[1].nonEmptyString else { return }
             attachments[row.integer(0), default: []].append(name)
         }
 
@@ -318,4 +318,10 @@ public struct StoreSummary: Sendable, Equatable, Codable {
     public let mailboxes: Int
     public let oldest: Date?
     public let newest: Date?
+}
+
+private extension SQLiteRow {
+
+    /// An integer column read as this store always has: 0 for NULL, a real truncated.
+    func integer(_ index: Int) -> Int64 { self[index].truncatedInt.map(Int64.init) ?? 0 }
 }

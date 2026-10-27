@@ -15,7 +15,7 @@ let package = Package(
     ],
     dependencies: [
         // Opening the Envelope Index read-only and running queries over it.
-        .package(url: "https://github.com/arraypress/swift-sqlite-reader.git", from: "0.1.0"),
+        .package(url: "https://github.com/arraypress/swift-sqlite-reader.git", from: "0.2.0"),
     ],
     targets: [
         .target(name: "AppleMail", dependencies: [
