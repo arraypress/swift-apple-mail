@@ -40,7 +40,9 @@ through Mail's AppleScript interface takes minutes.
 
 ## Read-only, and structurally so
 
-`MailStore` opens the index with `SQLITE_OPEN_READONLY` and no copy. There is
+`MailStore` opens the index with `SQLITE_OPEN_READONLY` and no copy, through
+[swift-sqlite-reader](https://github.com/arraypress/swift-sqlite-reader)'s
+`.readOnly`. There is
 no code path in this library that writes to it, and there should never be one:
 the schema is Apple's, undocumented, and read by a running application that
 caches it.
@@ -70,8 +72,9 @@ Message-ID — reaches them as `argv`, never pasted into the source.
 ## Requirements
 
 macOS 14+, and **Full Disk Access** for whatever runs it. Mail's data is in a
-protected folder; without it the open fails with `SQLITE_CANTOPEN`, which is
-reported as `MailError.notPermitted` rather than as a missing file.
+protected folder; without it macOS refuses the read (SQLite alone would say
+only `SQLITE_CANTOPEN`), which is reported as `MailError.notPermitted` rather
+than as a missing file.
 
 macOS only, and not by choice — Mail's message store exists nowhere else.
 

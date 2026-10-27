@@ -5,6 +5,7 @@
 //  Created by David Sherlock on 2026.
 //
 
+import SQLiteReader
 import XCTest
 @testable import AppleMail
 

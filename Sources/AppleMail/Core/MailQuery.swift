@@ -8,6 +8,7 @@
 //
 
 import Foundation
+import SQLiteReader
 
 /// A search over the mail index.
 ///

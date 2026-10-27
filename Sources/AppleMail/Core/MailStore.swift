@@ -8,11 +8,12 @@
 //
 
 import Foundation
+import SQLiteReader
 
 /// Everything Mail knows about your messages, read-only.
 ///
 /// This opens Mail's `Envelope Index` — a plain SQLite database — with a
-/// read-only connection and no copy. There is no code path here that writes to
+/// read-only connection and no copy, through swift-sqlite-reader. There is no code path here that writes to
 /// it, and there should never be one: the schema is Apple's, undocumented, and
 /// changed between versions. Changing a message goes through Mail itself; see
 /// ``MailScript``.
@@ -23,7 +24,7 @@ import Foundation
 /// ```
 public final class MailStore {
 
-    private let database: SQLiteDatabase
+    private let database: SQLiteReader
 
     /// Where the index lives.
     public let path: String
@@ -42,9 +43,24 @@ public final class MailStore {
     public init(path: String? = nil) throws {
         let resolved = try path ?? Self.defaultPath()
         self.path = resolved
-        self.database = try SQLiteDatabase(path: resolved)
-        self.hasGlobalData = database.hasTable("message_global_data")
-            && database.hasColumn("message_id_header", in: "message_global_data")
+        // `.readOnly` on the live file, with no copy. Measured against Mail's
+        // own index: a read-only connection sees the write-ahead log, so the
+        // newest messages are there — copying the file first (the usual
+        // advice) would miss anything still in the `-wal`, which on a busy
+        // mailbox is everything that arrived today.
+        do {
+            self.database = try SQLiteReader(path: URL(fileURLWithPath: resolved), opening: .readOnly)
+        } catch {
+            throw MailError(error)
+        }
+        self.hasGlobalData = database.tables().contains("message_global_data")
+            && database.columns(of: "message_global_data").contains("MESSAGE_ID_HEADER")
+    }
+
+    /// Runs a query, handing each row to `row`; values belong in
+    /// `parameters`, bound in order, never pasted into the SQL.
+    private func run(_ sql: String, _ parameters: [SQLiteValue] = [], row: (SQLiteRow) -> Void) throws {
+        do { try database.query(sql, parameters, row: row) } catch { throw MailError(error) }
     }
 
     // MARK: - Finding the index
@@ -100,7 +116,7 @@ public final class MailStore {
         }
 
         var messages: [Message] = []
-        try database.query(sql, values) { row in
+        try run(sql, values) { row in
             messages.append(Self.message(from: row))
         }
         return try attaching(to: messages)
@@ -111,7 +127,7 @@ public final class MailStore {
         var found: Message?
         let select = hasGlobalData ? QueryBuilder.columns : QueryBuilder.columnsWithoutHeader
         let tables = hasGlobalData ? QueryBuilder.from : QueryBuilder.fromWithoutHeader
-        try database.query(
+        try run(
             "select \(select) \(tables) where m.ROWID = ? limit 1",
             [.integer(id)]
         ) { row in
@@ -131,7 +147,7 @@ public final class MailStore {
     /// Every mailbox, across every account.
     public func mailboxes() throws -> [Mailbox] {
         var boxes: [Mailbox] = []
-        try database.query(
+        try run(
             "select ROWID, url, total_count, unread_count from mailboxes order by url"
         ) { row in
             guard let url = row.text(1) else { return }
@@ -167,7 +183,7 @@ public final class MailStore {
         values.append(.integer(Int64(max(1, limit))))
 
         var counts: [SenderCount] = []
-        try database.query(sql, values) { row in
+        try run(sql, values) { row in
             guard let address = row.text(0) else { return }
             counts.append(SenderCount(
                 sender: Address(address: address, name: row.text(1)),
@@ -184,7 +200,7 @@ public final class MailStore {
     /// those out of the message file when it is on this Mac.
     public func attachmentNames(messageID: Int64) throws -> [String] {
         var names: [String] = []
-        try database.query(
+        try run(
             "select name from attachments where message = ? order by ROWID",
             [.integer(messageID)]
         ) { row in
@@ -199,18 +215,18 @@ public final class MailStore {
         var unread = 0
         var oldest: Date?
         var newest: Date?
-        try database.query("""
+        try run("""
             select count(*), sum(case when read = 0 then 1 else 0 end),
                    min(date_received), max(date_received)
             from messages where deleted = 0
             """) { row in
             total = Int(row.integer(0))
             unread = Int(row.integer(1))
-            if !row.isNull(2) { oldest = Date(timeIntervalSince1970: TimeInterval(row.integer(2))) }
-            if !row.isNull(3) { newest = Date(timeIntervalSince1970: TimeInterval(row.integer(3))) }
+            if !row[2].isNull { oldest = Date(timeIntervalSince1970: TimeInterval(row.integer(2))) }
+            if !row[3].isNull { newest = Date(timeIntervalSince1970: TimeInterval(row.integer(3))) }
         }
         var mailboxCount = 0
-        try database.query("select count(*) from mailboxes") { mailboxCount = Int($0.integer(0)) }
+        try run("select count(*) from mailboxes") { mailboxCount = Int($0.integer(0)) }
         return StoreSummary(
             messages: total, unread: unread, mailboxes: mailboxCount,
             oldest: oldest, newest: newest
@@ -220,7 +236,7 @@ public final class MailStore {
     // MARK: - Internals
 
     /// Builds a message from a row of the standard column list.
-    private static func message(from row: SQLiteDatabase.Row) -> Message {
+    private static func message(from row: SQLiteRow) -> Message {
         Message(
             id: row.integer(0),
             messageID: row.text(1),
@@ -247,7 +263,7 @@ public final class MailStore {
         let values = ids.map { SQLiteValue.integer($0) }
 
         var recipients: [Int64: [Recipient]] = [:]
-        try database.query("""
+        try run("""
             select r.message, a.address, a.comment, r.type
             from recipients r join addresses a on a.ROWID = r.address
             where r.message in (\(holes)) order by r.position
@@ -260,7 +276,7 @@ public final class MailStore {
         }
 
         var attachments: [Int64: [String]] = [:]
-        try database.query(
+        try run(
             "select message, name from attachments where message in (\(holes)) order by ROWID",
             values
         ) { row in
