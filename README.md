@@ -160,6 +160,15 @@ three spellings are tried now.
 compile time: a variable called `base` compiles and then fails inside a
 `tell application "Mail"` block. Every variable in the scripts is `v`-prefixed.
 
+**On iCloud, a nested mailbox made in one go has a hollow parent.** Asking
+for `A/B` when `A` did not exist made `A` as a container only (IMAP's
+`\Noselect`; an iPhone shows it greyed out). Mail on the Mac showed it as an
+ordinary mailbox and reported a move into it as done — and two minutes later
+the server put the message back where it came from. `createMailbox` makes
+each level on its own now (0.3.1), and a message moved into a level made that
+way stays. A hollow folder made before then stays hollow: make it again in
+Mail, or file into a folder below it.
+
 **What Mail's scripting will not do**, measured on macOS 27: `delete` on a
 mailbox fails with -10000 even when it is empty, so there is no way to remove
 one; setting `content` on a reply reads back empty, so a reply has no body;
@@ -172,7 +181,7 @@ delegate to. The index holds envelopes; bodies are files.
 ## Installation
 
 ```swift
-.package(url: "https://github.com/arraypress/swift-apple-mail.git", from: "0.3.0")
+.package(url: "https://github.com/arraypress/swift-apple-mail.git", from: "0.3.1")
 ```
 
 ## Licence

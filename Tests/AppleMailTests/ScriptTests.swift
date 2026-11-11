@@ -197,6 +197,16 @@ final class MailboxScriptTests: XCTestCase {
         XCTAssertThrowsError(try MailScript.createMailbox(.onMyMac("A"), using: Recorder(reply: "unconfirmed").runner))
     }
 
+    /// Asking iCloud for `A/B` in one go, with no `A`, makes `A` a container
+    /// that cannot hold mail — a move into it is accepted, then undone by the
+    /// server. So each level is made on its own, and never the whole path.
+    func testMailboxesAreMadeOneLevelAtATime() {
+        let source = MailScriptSources.createMailbox
+        XCTAssertTrue(source.contains("set vParts to text items of vThePath"))
+        XCTAssertTrue(source.contains("with properties {name:vSoFar}"))
+        XCTAssertFalse(source.contains("with properties {name:vThePath}"))
+    }
+
     func testRenameKeepsTheParentAndRefusesATakenName() throws {
         let recorder = Recorder(reply: "renamed")
         let after = try MailScript.renameMailbox(MailboxReference(accountID: icloud, path: "Accounting/Tax"),

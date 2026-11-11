@@ -153,8 +153,14 @@ enum MailScriptSources {
     /// `argv`: account id (`""` for On My Mac), path.
     /// Replies `exists`, `created`, or `unconfirmed`.
     ///
-    /// Measured: `make new mailbox at account … with properties {name:"A/B"}`
-    /// makes `A` and `A/B`; with no `at` it makes an On My Mac mailbox.
+    /// Each missing level is made on its own, top first: `A`, then `A/B`.
+    ///
+    /// Measured on iCloud (2026-11-12): asking for `A/B` in one go when `A`
+    /// did not exist made `A` as a container only — IMAP's `\Noselect`,
+    /// greyed out on an iPhone. Mail on the Mac showed it as an ordinary
+    /// mailbox and accepted a move into it, and minutes later the server put
+    /// the message back where it came from. Made on their own, every level
+    /// holds mail. With no `at`, a mailbox is made under On My Mac.
     static let createMailbox = """
         \(boxHandler)
 
@@ -162,15 +168,29 @@ enum MailScriptSources {
             set vAccountID to item 1 of argv
             set vThePath to item 2 of argv
             if my boxExists(vAccountID, vThePath) then return "exists"
-            tell application "Mail"
-                if vAccountID is "" then
-                    make new mailbox with properties {name:vThePath}
+            set vSaved to AppleScript's text item delimiters
+            set AppleScript's text item delimiters to "/"
+            set vParts to text items of vThePath
+            set AppleScript's text item delimiters to vSaved
+            set vSoFar to ""
+            repeat with vPart in vParts
+                if vSoFar is "" then
+                    set vSoFar to (vPart as text)
                 else
-                    make new mailbox at (first account whose id is vAccountID) with properties {name:vThePath}
+                    set vSoFar to vSoFar & "/" & (vPart as text)
                 end if
-            end tell
-            if my boxExists(vAccountID, vThePath) then return "created"
-            return "unconfirmed"
+                if not my boxExists(vAccountID, vSoFar) then
+                    tell application "Mail"
+                        if vAccountID is "" then
+                            make new mailbox with properties {name:vSoFar}
+                        else
+                            make new mailbox at (first account whose id is vAccountID) with properties {name:vSoFar}
+                        end if
+                    end tell
+                    if not my boxExists(vAccountID, vSoFar) then return "unconfirmed"
+                end if
+            end repeat
+            return "created"
         end run
         """
 
