@@ -59,7 +59,7 @@ public final class MailStore {
 
     /// Runs a query, handing each row to `row`; values belong in
     /// `parameters`, bound in order, never pasted into the SQL.
-    private func run(_ sql: String, _ parameters: [SQLiteValue] = [], row: (SQLiteRow) -> Void) throws {
+    func run(_ sql: String, _ parameters: [SQLiteValue] = [], row: (SQLiteRow) -> Void) throws {
         do { try database.query(sql, parameters, row: row) } catch { throw MailError(error) }
     }
 
@@ -166,7 +166,9 @@ public final class MailStore {
     /// - Parameters:
     ///   - limit: How many senders to return.
     ///   - since: Only count mail received on or after this.
-    public func senders(limit: Int = 25, since: Date? = nil) throws -> [SenderCount] {
+    ///   - automated: Only machine-sent mail (`true`), only people (`false`),
+    ///     or both (`nil`). See ``Message/isAutomated``.
+    public func senders(limit: Int = 25, since: Date? = nil, automated: Bool? = nil) throws -> [SenderCount] {
         var sql = """
             select a.address, a.comment, count(*) as total,
                    max(m.date_received) as latest
@@ -175,6 +177,9 @@ public final class MailStore {
             where m.deleted = 0
             """
         var values: [SQLiteValue] = []
+        if let automated {
+            sql += automated ? " and m.automated_conversation = 2" : " and m.automated_conversation != 2"
+        }
         if let since {
             sql += " and m.date_received >= ?"
             values.append(.integer(Int64(since.timeIntervalSince1970)))
@@ -237,18 +242,25 @@ public final class MailStore {
 
     /// Builds a message from a row of the standard column list.
     private static func message(from row: SQLiteRow) -> Message {
-        Message(
+        let box = row[7].decodedString.map { Mailbox(id: 0, url: $0) }
+        let flagged = row.integer(10) != 0
+        return Message(
             id: row.integer(0),
             messageID: row[1].decodedString,
             subject: row[2].decodedString ?? "",
             sender: Address(address: row[3].decodedString ?? "", name: row[4].decodedString),
             sentAt: Date(timeIntervalSince1970: TimeInterval(row.integer(5))),
             receivedAt: Date(timeIntervalSince1970: TimeInterval(row.integer(6))),
-            mailbox: row[7].decodedString.map { Mailbox.split($0).name } ?? "",
+            mailbox: box?.name ?? "",
             conversationID: row.integer(8),
             isRead: row.integer(9) != 0,
-            isFlagged: row.integer(10) != 0,
-            size: Int(row.integer(11))
+            isFlagged: flagged,
+            size: Int(row.integer(11)),
+            accountID: box?.accountID,
+            isAutomated: row.integer(12) == 2,
+            // The index keeps the last colour after a flag is removed, so the
+            // colour only means something while the message is flagged.
+            flagColor: flagged ? FlagColor(rawValue: Int(row.integer(13))) : nil
         )
     }
 
@@ -298,7 +310,10 @@ public final class MailStore {
                 isRead: message.isRead,
                 isFlagged: message.isFlagged,
                 size: message.size,
-                attachmentNames: attachments[message.id] ?? []
+                attachmentNames: attachments[message.id] ?? [],
+                accountID: message.accountID,
+                isAutomated: message.isAutomated,
+                flagColor: message.flagColor
             )
         }
     }
@@ -320,7 +335,7 @@ public struct StoreSummary: Sendable, Equatable, Codable {
     public let newest: Date?
 }
 
-private extension SQLiteRow {
+extension SQLiteRow {
 
     /// An integer column read as this store always has: 0 for NULL, a real truncated.
     func integer(_ index: Int) -> Int64 { self[index].truncatedInt.map(Int64.init) ?? 0 }

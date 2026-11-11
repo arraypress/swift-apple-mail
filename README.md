@@ -36,7 +36,25 @@ through Mail's AppleScript interface takes minutes.
 | `MailStore.saveAttachments(of:to:)` | write them out |
 | `MailStore.senders(limit:since:)` | who writes to you most |
 | `MailStore.mailboxes()` | every folder, with counts |
-| `MailScript` | draft, flag, mark read — through Mail.app |
+| `MailStore.awaitingReply(since:limit:)` | conversations where a person wrote last |
+| `MailStore.filingSuggestions(in:…)` | where a mailbox's mail probably belongs, with the counts behind it |
+| `MailStore.messages(messageID:)` | every copy of a message, by `Message-ID` |
+| `MailStore.rawMessage(id:)` | the message as received, ready to save as `.eml` |
+
+## What it changes — through Mail.app
+
+| Call | Does |
+|---|---|
+| `MailScript.draft` | opens a filled-in draft — never sends |
+| `MailScript.reply(to:all:)` / `forward(_:to:)` | opens Mail's own reply or forward — never sends |
+| `MailScript.setFlag` / `setRead` | flags (in any of Mail's seven colours), unflags, marks read or unread |
+| `MailScript.move` / `copy` | files messages into a mailbox |
+| `MailScript.createMailbox` / `renameMailbox` | makes and renames mailboxes |
+| `MailScript.rules` / `addFilingRule` | lists Mail's rules; adds one that only files |
+| `MailScript.checkForNewMail` | asks Mail to fetch |
+
+Messages are named by `MessageLocator` — mailbox plus `Message-ID` — not by
+index id, because the id changes when a message moves.
 
 ## Read-only, and structurally so
 
@@ -51,9 +69,13 @@ The read-only connection sees the write-ahead log, so today's mail is there.
 Copying the file first — the usual advice — misses everything still in the
 `-wal`, which on a busy mailbox is everything that arrived today.
 
-Changing anything goes through Mail itself, over AppleScript, and the surface
-is deliberately narrow: compose a draft, flag a message, mark it read. It
-**cannot send, delete or move**.
+Changing anything goes through Mail itself, over AppleScript, and only for
+things that can be undone. It **cannot send mail, delete a message or remove a
+mailbox**, and `MailboxSafety` refuses Trash, Junk, Drafts, Sent and Outbox as
+a destination for `move`, `copy` or a rule — the mailboxes Mail empties or
+sends from. A batch finds every message and the destination before it changes
+anything; if one is missing, nothing changes. A rule is made switched off,
+read back and checked, and only then switched on.
 
 **You pass the thing that runs AppleScript** (0.2.0). Every `MailScript` call
 takes `using runner: AppleScriptRunner` — `(source, arguments) throws -> String`
@@ -120,13 +142,37 @@ thread, it is slow, and it **fetches remote content** — the tracking pixels in
 a marketing email. Reading your own mail should not tell the sender you read
 it. The HTML is reduced to text by a scanner instead.
 
+**Mail's `message id` has no angle brackets; the index's does.** Asking Mail
+for `<…>` matches nothing, so `mark` in 0.1 and 0.2 reported every message as
+not found. `MessageIDs.bare` strips them now.
+
+**A `Message-ID` is not unique once there are copies.** `copy` gives two
+messages the same one, so a locator could name the original when the copy was
+meant. The locator carries the mailbox, and `messages(messageID:)` returns
+every match so a caller can refuse an ambiguous one.
+
+**The index percent-encodes mailbox names, with accents decomposed** —
+`Sent%20Messages`, `Hotel%20(Zu%CC%88rich)`. A mailbox filter written as Mail
+shows the name matched nothing for anything with a space or an accent. All
+three spellings are tried now.
+
+**AppleScript variables can collide with Mail's dictionary at run time**, not
+compile time: a variable called `base` compiles and then fails inside a
+`tell application "Mail"` block. Every variable in the scripts is `v`-prefixed.
+
+**What Mail's scripting will not do**, measured on macOS 27: `delete` on a
+mailbox fails with -10000 even when it is empty, so there is no way to remove
+one; setting `content` on a reply reads back empty, so a reply has no body;
+and Mail's index can take over a minute to list a mailbox Mail itself can
+already use.
+
 **Spotlight had 0 mail messages indexed**, so there is no fast body search to
 delegate to. The index holds envelopes; bodies are files.
 
 ## Installation
 
 ```swift
-.package(url: "https://github.com/arraypress/swift-apple-mail.git", from: "0.2.0")
+.package(url: "https://github.com/arraypress/swift-apple-mail.git", from: "0.3.0")
 ```
 
 ## Licence

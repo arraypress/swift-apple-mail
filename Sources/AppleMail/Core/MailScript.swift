@@ -25,9 +25,24 @@ public typealias AppleScriptRunner = @Sendable (_ source: String, _ arguments: [
 /// undocumented, and read by a running application that caches it — a direct
 /// write would be corruption waiting for a restart. So every change goes
 /// through Mail itself, over AppleScript, and the surface is deliberately
-/// narrow: this can compose a draft, and it can flag or mark a message. It
-/// cannot send, delete or move, because those are the operations whose
-/// mistakes cannot be taken back.
+/// shaped around what can be put back:
+///
+/// - compose a draft, a reply or a forward — opened, **never sent**;
+/// - flag, colour and mark messages read;
+/// - make and rename mailboxes, and file mail into them;
+/// - add a rule that only files.
+///
+/// **It cannot send, and it cannot delete anything.** Not a message — nor
+/// move or copy one
+/// into Trash, Junk, Drafts or anywhere else Mail empties or sends from (see
+/// ``MailboxSafety``). Those are the operations whose mistakes cannot be
+/// taken back. Junk marking is left out for the same reason: Mail can empty
+/// what it considers junk on a schedule. Removing a mailbox is not offered
+/// either: Mail on macOS 27 refuses `delete` on a mailbox from a script
+/// (-10000, "AppleEvent handler failed", measured on an empty local one).
+///
+/// **Every batch finds every message before it changes any.** If one is
+/// missing, or the destination is, nothing is done.
 ///
 /// **Every value goes in as `argv`, never into the script's source.** A
 /// subject with a quote, a backslash or `end tell` in it is text, and an
@@ -114,12 +129,17 @@ public enum MailScript {
     /// turn. Addressing by the RFC header rather than by position is the point:
     /// `message 3 of mailbox 2` means something different the moment mail
     /// arrives, and this is somebody's real mailbox.
+    ///
+    /// Before 0.3.0 this handed Mail the header with its angle brackets, which
+    /// Mail's `message id` never matches — every call reported "no message".
+    /// The bare form is what Mail holds. Prefer the ``MessageLocator`` forms,
+    /// which ask one mailbox rather than all of them.
     private static func mark(_ script: String, messageID: String, value: Bool,
                              using runner: AppleScriptRunner) throws {
-        guard messageID.hasPrefix("<"), messageID.hasSuffix(">"), !messageID.contains("\"") else {
+        guard MessageIDs.isUsable(messageID) else {
             throw MailError.scriptFailed("\(messageID) is not a Message-ID")
         }
-        let result = try runner(script, [messageID, value ? "true" : "false"])
+        let result = try runner(script, [MessageIDs.bare(messageID), value ? "true" : "false"])
         guard result.trimmingCharacters(in: .whitespacesAndNewlines) != "notfound" else {
             throw MailError.scriptFailed("Mail has no message with that Message-ID")
         }

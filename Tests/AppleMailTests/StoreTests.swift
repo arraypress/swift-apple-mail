@@ -213,8 +213,11 @@ final class ScriptTests: XCTestCase {
         let recorder = RecordingRunner()
         try MailScript.setFlagged(true, messageID: "<m1@example.invalid>", using: recorder.runner)
         try MailScript.setRead(false, messageID: "<m2@example.invalid>", using: recorder.runner)
-        XCTAssertEqual(recorder.calls.map(\.arguments), [["<m1@example.invalid>", "true"],
-                                                         ["<m2@example.invalid>", "false"]])
+        // Bare, not bracketed: Mail's `message id` never matches the header's
+        // angle brackets. This test asserted the bracketed form before 0.3.0,
+        // which is how `mark` shipped never finding a message.
+        XCTAssertEqual(recorder.calls.map(\.arguments), [["m1@example.invalid", "true"],
+                                                         ["m2@example.invalid", "false"]])
         XCTAssertTrue(recorder.calls[0].source.contains("set flagged status of item 1 of matches to newValue"))
         XCTAssertTrue(recorder.calls[1].source.contains("set read status of item 1 of matches to newValue"))
         XCTAssertFalse(recorder.calls[0].source.contains("m1@example"))
@@ -239,8 +242,21 @@ final class ScriptTests: XCTestCase {
     /// The scripts compile — checked with osacompile, which reads Mail's
     /// dictionary from its bundle and sends it nothing.
     func testTheScriptsCompile() throws {
-        for (name, source) in [("draft", MailScript.Scripts.draft), ("flag", MailScript.Scripts.flag),
-                               ("read", MailScript.Scripts.read)] {
+        let all: [(String, String)] = [
+            ("draft", MailScript.Scripts.draft), ("flag", MailScript.Scripts.flag),
+            ("read", MailScript.Scripts.read),
+            ("move", MailScriptSources.move), ("copy", MailScriptSources.copy),
+            ("batch-read", MailScriptSources.read), ("batch-flagged", MailScriptSources.flagged),
+            ("flag-index", MailScriptSources.flagIndex),
+            ("create", MailScriptSources.createMailbox), ("rename", MailScriptSources.renameMailbox),
+            ("rules", MailScriptSources.listRules),
+            ("rule-from", MailScriptSources.addFilingRule(field: .from)),
+            ("rule-subject", MailScriptSources.addFilingRule(field: .subject)),
+            ("rule-to", MailScriptSources.addFilingRule(field: .to)),
+            ("reply", MailScriptSources.reply), ("forward", MailScriptSources.forward),
+            ("check", MailScriptSources.checkForNewMail),
+        ]
+        for (name, source) in all {
             let folder = FileManager.default.temporaryDirectory
             let input = folder.appendingPathComponent("mailscript-\(name)-\(UUID().uuidString).applescript")
             let output = input.deletingPathExtension().appendingPathExtension("scpt")

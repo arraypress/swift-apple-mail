@@ -29,12 +29,28 @@ public struct Mailbox: Sendable, Equatable, Codable, Identifiable {
     public let totalCount: Int
     public let unreadCount: Int
 
+    /// Whether this is an On My Mac mailbox (`local://…`) rather than one in
+    /// an account. Local mailboxes never sync anywhere.
+    public let isLocal: Bool
+
     public init(id: Int64, url: String, totalCount: Int = 0, unreadCount: Int = 0) {
         self.id = id
         self.url = url
         self.totalCount = totalCount
         self.unreadCount = unreadCount
         (self.account, self.name) = Self.split(url)
+        self.isLocal = url.lowercased().hasPrefix("local:")
+    }
+
+    /// Mail's account identifier for this mailbox, or `nil` for On My Mac.
+    ///
+    /// The host of the URL, which for Mail's own accounts is the account's
+    /// UUID — the same value AppleScript reports as `id of account`.
+    public var accountID: String? { isLocal ? nil : account }
+
+    /// How Mail's scripting finds this mailbox.
+    public var reference: MailboxReference {
+        MailboxReference(accountID: accountID, path: name)
     }
 
     /// Splits a mailbox URL into an account and a folder path.

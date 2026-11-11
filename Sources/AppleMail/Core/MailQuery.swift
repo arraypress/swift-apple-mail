@@ -62,6 +62,13 @@ public struct MailQuery: Sendable, Equatable {
     /// Newest first, or oldest first.
     public var newestFirst: Bool
 
+    /// Biggest first, ignoring ``newestFirst``.
+    public var largestFirst: Bool
+
+    /// Only machine-sent mail (`true`), only mail from people (`false`), or
+    /// either. Mail's own classification; see ``Message/isAutomated``.
+    public var isAutomated: Bool?
+
     public init(
         text: String? = nil,
         from: String? = nil,
@@ -76,7 +83,9 @@ public struct MailQuery: Sendable, Equatable {
         incomingOnly: Bool = true,
         conversationID: Int64? = nil,
         limit: Int = 50,
-        newestFirst: Bool = true
+        newestFirst: Bool = true,
+        largestFirst: Bool = false,
+        isAutomated: Bool? = nil
     ) {
         self.text = text
         self.from = from
@@ -92,13 +101,15 @@ public struct MailQuery: Sendable, Equatable {
         self.conversationID = conversationID
         self.limit = limit
         self.newestFirst = newestFirst
+        self.largestFirst = largestFirst
+        self.isAutomated = isAutomated
     }
 
     /// Whether this query narrows anything at all.
     public var isEmpty: Bool {
         text == nil && from == nil && to == nil && subject == nil && mailbox == nil
             && since == nil && until == nil && isRead == nil && isFlagged == nil
-            && hasAttachments == nil && conversationID == nil
+            && hasAttachments == nil && conversationID == nil && isAutomated == nil
     }
 }
 
@@ -119,7 +130,7 @@ enum QueryBuilder {
     static let columns = """
         m.ROWID, g.message_id_header, s.subject, a.address, a.comment,
         m.date_sent, m.date_received, mb.url, m.conversation_id,
-        m.read, m.flagged, m.size
+        m.read, m.flagged, m.size, m.automated_conversation, m.flag_color
         """
 
     /// The same, for an index too old to have `message_global_data`.
@@ -181,8 +192,12 @@ enum QueryBuilder {
             values.append(contains(subject))
         }
         if let mailbox = query.mailbox {
-            conditions.append("mb.url like ? escape '\\'")
-            values.append(contains(mailbox))
+            // The index stores mailbox URLs percent-encoded — `Sent%20Messages`,
+            // `Hotel%20(Zu%CC%88rich)`, decomposed — so a name as Mail shows
+            // it, with a space or an accent, matched nothing before 0.3.0. All
+            // three spellings are tried.
+            conditions.append("(mb.url like ? escape '\\' or mb.url like ? escape '\\' or mb.url like ? escape '\\')")
+            values.append(contentsOf: mailboxSpellings(mailbox).map(contains))
         }
         if let since = query.since {
             conditions.append("m.date_received >= ?")
@@ -204,6 +219,9 @@ enum QueryBuilder {
             let test = hasAttachments ? "exists" : "not exists"
             conditions.append("\(test) (select 1 from attachments at where at.message = m.ROWID)")
         }
+        if let automated = query.isAutomated {
+            conditions.append(automated ? "m.automated_conversation = 2" : "m.automated_conversation != 2")
+        }
         if let conversation = query.conversationID {
             conditions.append("m.conversation_id = ?")
             values.append(.integer(conversation))
@@ -212,19 +230,31 @@ enum QueryBuilder {
         return ("where " + conditions.joined(separator: " and "), values)
     }
 
+    /// A mailbox name as written, percent-encoded, and percent-encoded after
+    /// canonical decomposition — the forms it can take inside an index URL.
+    static func mailboxSpellings(_ name: String) -> [String] {
+        let allowed = CharacterSet.urlPathAllowed
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: allowed) ?? name
+        let decomposed = name.decomposedStringWithCanonicalMapping
+            .addingPercentEncoding(withAllowedCharacters: allowed) ?? name
+        return [name, encoded, decomposed]
+    }
+
     /// The whole statement for a query.
     static func sql(
         for query: MailQuery,
         includeHeader: Bool = true
     ) -> (sql: String, values: [SQLiteValue]) {
         let (where_, values) = clauses(for: query)
-        let order = query.newestFirst ? "desc" : "asc"
+        let order = query.largestFirst
+            ? "m.size desc"
+            : "m.date_received " + (query.newestFirst ? "desc" : "asc")
         let select = includeHeader ? columns : columnsWithoutHeader
         let tables = includeHeader ? from : fromWithoutHeader
         // The limit is an integer this library controls, but it is bound
         // anyway: the rule is that nothing reaches the statement as text.
         return (
-            "select \(select) \(tables) \(where_) order by m.date_received \(order) limit ?",
+            "select \(select) \(tables) \(where_) order by \(order) limit ?",
             values + [.integer(Int64(max(1, query.limit)))]
         )
     }
