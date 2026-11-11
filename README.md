@@ -45,13 +45,14 @@ through Mail's AppleScript interface takes minutes.
 
 | Call | Does |
 |---|---|
-| `MailScript.draft` | opens a filled-in draft — never sends |
+| `MailScript.draft` | opens a filled-in draft, with attachments — never sends |
 | `MailScript.reply(to:all:)` / `forward(_:to:)` | opens Mail's own reply or forward — never sends |
 | `MailScript.setFlag` / `setRead` | flags (in any of Mail's seven colours), unflags, marks read or unread |
 | `MailScript.move` / `copy` | files messages into a mailbox |
 | `MailScript.createMailbox` / `renameMailbox` | makes and renames mailboxes |
-| `MailScript.rules` / `addFilingRule` | lists Mail's rules; adds one that only files |
-| `MailScript.checkForNewMail` | asks Mail to fetch |
+| `MailScript.rules` / `addRule` | lists Mail's rules; adds one that files, copies, marks read or flags |
+| `MailScript.setRuleEnabled` | switches a rule off, or on unless it sends or deletes (`RuleSafety`) |
+| `MailScript.checkForNewMail` | asks Mail to fetch, and syncs each IMAP account |
 
 Messages are named by `MessageLocator` — mailbox plus `Message-ID` — not by
 index id, because the id changes when a message moves.
@@ -169,6 +170,16 @@ each level on its own now (0.3.1), and a message moved into a level made that
 way stays. A hollow folder made before then stays hollow: make it again in
 Mail, or file into a folder below it.
 
+**A draft that was never shown can't be got rid of.** An outgoing message made
+with `visible:false` ignores both `close … saving no` and `delete`, and stays
+in memory until Mail quits; making it visible to close it got it autosaved to
+Drafts instead. So `draft` attaches files to the visible draft it opens.
+
+**Message highlight colours don't round-trip.** `background color` reads back
+as set, but the index stored green as `c9a9f4` (lavender), blue as `9bffc9`
+(mint) and red as `ff9298`, and only 5 of 7,256 messages on a real account
+had one at all. It is not offered; flag colours do the job.
+
 **What Mail's scripting will not do**, measured on macOS 27: `delete` on a
 mailbox fails with -10000 even when it is empty, so there is no way to remove
 one; setting `content` on a reply reads back empty, so a reply has no body;
@@ -181,7 +192,7 @@ delegate to. The index holds envelopes; bodies are files.
 ## Installation
 
 ```swift
-.package(url: "https://github.com/arraypress/swift-apple-mail.git", from: "0.3.1")
+.package(url: "https://github.com/arraypress/swift-apple-mail.git", from: "0.4.0")
 ```
 
 ## Licence

@@ -264,42 +264,88 @@ enum MailScriptSources {
         end run
         """
 
-    /// A rule that only files: vMatches one header and moves the message.
+    /// A rule that matches one header and does only what ``RuleActions``
+    /// allows: move, copy, mark read, flag.
     ///
-    /// `argv`: rule name, the text to match, account id and path of the
-    /// destination, `true`/`false` for enabled. Replies `notarget`, `taken`,
-    /// `added`, or `unconfirmed`.
+    /// `argv`: rule name, the text to match, account id and path to move to
+    /// (path `""` for no move), account id and path to copy to (path `""` for
+    /// no copy), `true`/`false` for mark read, a flag index (`-1` for none),
+    /// `true`/`false` for enabled. Replies `notarget`, `nocopytarget`,
+    /// `taken`, `added`, or `unconfirmed`.
     ///
-    /// Created DISABLED, given its condition, checked, and only then switched
-    /// on — a rule half-made by a script that failed midway is a rule that
-    /// vMatches everything, and it must not be live while that is possible.
-    /// Measured: a rule made this way reads back with exactly these
-    /// properties, and `delete` / `forward` / `redirect` empty.
+    /// Created DISABLED, given its condition, read back field by field, and
+    /// only then switched on — a rule half-made by a script that failed midway
+    /// is a rule that matches everything, and it must not be live while that
+    /// is possible. Measured (macOS 27): a rule made with mark read, mark
+    /// flagged, `mark flag index` 3 and a copy target reads back with exactly
+    /// those, and delete / forward / redirect / reply empty.
     ///
     /// - Parameter field: Which header. A constant from ``RuleField``, never
     ///   a value.
-    static func addFilingRule(field: RuleField) -> String {
+    static func addRule(field: RuleField) -> String {
         """
         \(boxHandler)
 
         on run argv
             set vRuleName to item 1 of argv
             set vMatchText to item 2 of argv
-            if not my boxExists(item 3 of argv, item 4 of argv) then return "notarget"
+            set vMoving to (item 4 of argv) is not ""
+            set vCopying to (item 6 of argv) is not ""
+            set vMarkRead to (item 7 of argv) is "true"
+            set vFlagIndex to (item 8 of argv) as integer
+            set vFlagging to vFlagIndex is not -1
+            if vMoving and not my boxExists(item 3 of argv, item 4 of argv) then return "notarget"
+            if vCopying and not my boxExists(item 5 of argv, item 6 of argv) then return "nocopytarget"
             tell application "Mail"
                 if (count of (rules whose name is vRuleName)) is not 0 then return "taken"
-                set vTargetBox to my boxFor(item 3 of argv, item 4 of argv)
-                set r to make new rule at end of rules with properties {name:vRuleName, enabled:false, all conditions must be met:true, should move message:true, move message:vTargetBox, should copy message:false, delete message:false, mark read:false, mark flagged:false, stop evaluating rules:false}
+                set vProps to {name:vRuleName, enabled:false, all conditions must be met:true, delete message:false, mark read:vMarkRead, mark flagged:vFlagging, stop evaluating rules:false}
+                if vMoving then
+                    set vProps to vProps & {should move message:true, move message:(my boxFor(item 3 of argv, item 4 of argv))}
+                else
+                    set vProps to vProps & {should move message:false}
+                end if
+                if vCopying then
+                    set vProps to vProps & {should copy message:true, copy message:(my boxFor(item 5 of argv, item 6 of argv))}
+                else
+                    set vProps to vProps & {should copy message:false}
+                end if
+                set r to make new rule at end of rules with properties vProps
+                if vFlagging then set mark flag index of r to vFlagIndex
                 tell r to make new rule condition at end of rule conditions with properties {rule type:\(field.appleScriptType), qualifier:does contain value, expression:vMatchText}
                 if (count of rule conditions of r) is not 1 then return "unconfirmed"
                 if (expression of item 1 of rule conditions of r) is not vMatchText then return "unconfirmed"
                 if delete message of r then return "unconfirmed"
-                if (item 5 of argv) is "true" then set enabled of r to true
+                if (should move message of r) is not vMoving then return "unconfirmed"
+                if (should copy message of r) is not vCopying then return "unconfirmed"
+                if (mark read of r) is not vMarkRead then return "unconfirmed"
+                if (mark flagged of r) is not vFlagging then return "unconfirmed"
+                if vFlagging and (mark flag index of r) is not vFlagIndex then return "unconfirmed"
+                if (forward message of r) is not "" then return "unconfirmed"
+                if (redirect message of r) is not "" then return "unconfirmed"
+                if (reply text of r) is not "" then return "unconfirmed"
+                if (item 9 of argv) is "true" then set enabled of r to true
                 return "added"
             end tell
         end run
         """
     }
+
+    /// `argv`: rule name, `true`/`false`. Replies `norule`, `ambiguous`,
+    /// `done` or `unconfirmed`. Measured: `enabled` reads back as set.
+    static let setRuleEnabled = """
+        on run argv
+            set vWanted to ((item 2 of argv) is "true")
+            tell application "Mail"
+                set vHits to (rules whose name is (item 1 of argv))
+                if (count of vHits) is 0 then return "norule"
+                if (count of vHits) is not 1 then return "ambiguous"
+                set r to item 1 of vHits
+                set enabled of r to vWanted
+                if (enabled of r) is vWanted then return "done"
+                return "unconfirmed"
+            end tell
+        end run
+        """
 
     // MARK: - Composing
 
@@ -351,10 +397,22 @@ enum MailScriptSources {
         """
 
     /// No `argv`. Asks every account to fetch.
+    /// No `argv`. Replies `checked`, then the name of each account it
+    /// synchronised, one a line. Measured: `synchronize` on an iCloud (IMAP)
+    /// account returns at once; on a POP account it fails, which is skipped.
     static let checkForNewMail = """
         on run argv
-            tell application "Mail" to check for new mail
-            return "checked"
+            set vOut to "checked"
+            tell application "Mail"
+                check for new mail
+                repeat with vAccount in (accounts whose enabled is true)
+                    try
+                        synchronize with vAccount
+                        set vOut to vOut & linefeed & (name of vAccount)
+                    end try
+                end repeat
+            end tell
+            return vOut
         end run
         """
 }

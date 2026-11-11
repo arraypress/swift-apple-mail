@@ -201,7 +201,7 @@ final class ScriptTests: XCTestCase {
         XCTAssertEqual(result, "drafted")
         XCTAssertEqual(recorder.calls.count, 1)
         let call = try XCTUnwrap(recorder.calls.first)
-        XCTAssertEqual(call.arguments, [subject, "hi\n\n> line 1\n> line 2", "2",
+        XCTAssertEqual(call.arguments, [subject, "hi\n\n> line 1\n> line 2", "2", "1",
                                         "ada@example.invalid", "bob@example.invalid", "cy@example.invalid"])
         XCTAssertFalse(call.source.contains("ada@example.invalid"), "values never enter the source")
         XCTAssertFalse(call.source.contains("quotes"), "values never enter the source")
@@ -250,9 +250,10 @@ final class ScriptTests: XCTestCase {
             ("flag-index", MailScriptSources.flagIndex),
             ("create", MailScriptSources.createMailbox), ("rename", MailScriptSources.renameMailbox),
             ("rules", MailScriptSources.listRules),
-            ("rule-from", MailScriptSources.addFilingRule(field: .from)),
-            ("rule-subject", MailScriptSources.addFilingRule(field: .subject)),
-            ("rule-to", MailScriptSources.addFilingRule(field: .to)),
+            ("rule-from", MailScriptSources.addRule(field: .from)),
+            ("rule-subject", MailScriptSources.addRule(field: .subject)),
+            ("rule-to", MailScriptSources.addRule(field: .to)),
+            ("rule-enabled", MailScriptSources.setRuleEnabled),
             ("reply", MailScriptSources.reply), ("forward", MailScriptSources.forward),
             ("check", MailScriptSources.checkForNewMail),
         ]

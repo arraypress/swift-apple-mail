@@ -74,7 +74,13 @@ public enum MailScript {
     ///   - subject: The subject line.
     ///   - body: The message text.
     ///   - quoting: Text to include below the new message, quoted with `>`.
+    ///   - attachments: Files to attach. Each must be an existing, readable,
+    ///     ordinary file outside any hidden folder — see
+    ///     ``DraftSafety/attachmentProblem(_:)``.
     ///   - runner: Runs the script.
+    /// - Throws: ``MailError/scriptFailed(_:)`` when an address or a file is
+    ///   refused (nothing was opened), or when the draft opened but Mail
+    ///   attached fewer files than asked — check it before sending.
     @discardableResult
     public static func draft(
         to: [String],
@@ -82,15 +88,28 @@ public enum MailScript {
         subject: String,
         body: String,
         quoting: String? = nil,
+        attachments: [URL] = [],
         using runner: AppleScriptRunner
     ) throws -> String {
-        try runner(Scripts.draft, draftArguments(to: to, cc: cc, subject: subject, body: body, quoting: quoting))
+        for file in attachments {
+            if let problem = DraftSafety.attachmentProblem(file) { throw MailError.scriptFailed(problem) }
+        }
+        let reply = try runner(Scripts.draft, draftArguments(to: to, cc: cc, subject: subject, body: body,
+                                                             quoting: quoting, attachments: attachments))
+        if reply.hasPrefix("attached ") {
+            let attached = reply.dropFirst("attached ".count)
+            throw MailError.scriptFailed(
+                "the draft is open in Mail but has \(attached) of \(attachments.count) attachments — check it before sending"
+            )
+        }
+        return reply
     }
 
-    /// The draft script's `argv`: subject, content, how many `to`, then the
-    /// `to` addresses, then the `cc` addresses.
+    /// The draft script's `argv`: subject, content, how many `to`, how many
+    /// `cc`, then the `to` addresses, the `cc` addresses, and the paths of the
+    /// files to attach.
     static func draftArguments(
-        to: [String], cc: [String], subject: String, body: String, quoting: String?
+        to: [String], cc: [String], subject: String, body: String, quoting: String?, attachments: [URL] = []
     ) throws -> [String] {
         for address in to + cc {
             guard address.contains("@"), !address.contains("\""), !address.contains("\n") else {
@@ -106,7 +125,8 @@ public enum MailScript {
                 .joined(separator: "\n")
             content += "\n\n" + quoted
         }
-        return [subject, content, String(to.count)] + to + cc
+        return [subject, content, String(to.count), String(cc.count)] + to + cc
+            + attachments.map { $0.standardizedFileURL.path }
     }
 
     // MARK: - Marking
@@ -150,25 +170,43 @@ public enum MailScript {
     /// The scripts, as constants. Values arrive in `argv`.
     enum Scripts {
 
-        /// `argv`: subject, content, count of `to`, the `to` addresses, the
-        /// `cc` addresses.
+        /// `argv`: subject, content, count of `to`, count of `cc`, the `to`
+        /// addresses, the `cc` addresses, the paths to attach. Replies
+        /// `drafted`, or `attached N` when Mail attached fewer files than asked.
+        ///
+        /// Measured: a file attached with `make new attachment … at after last
+        /// paragraph` counts as one of `attachments of content`. Attached to
+        /// the visible draft on purpose: Mail can neither close nor delete an
+        /// outgoing message that was never shown, so a hidden one would sit in
+        /// memory until Mail quits.
         static let draft = """
             on run argv
                 set theSubject to item 1 of argv
                 set theContent to item 2 of argv
                 set toCount to (item 3 of argv) as integer
+                set ccCount to (item 4 of argv) as integer
+                set firstFile to 5 + toCount + ccCount
                 tell application "Mail"
                     set theDraft to make new outgoing message with properties \
             {subject:theSubject, content:theContent, visible:true}
                     tell theDraft
-                        repeat with i from 4 to (3 + toCount)
+                        repeat with i from 5 to (4 + toCount)
                             make new to recipient at end of to recipients with properties {address:(item i of argv)}
                         end repeat
-                        repeat with i from (4 + toCount) to (count of argv)
+                        repeat with i from (5 + toCount) to (4 + toCount + ccCount)
                             make new cc recipient at end of cc recipients with properties {address:(item i of argv)}
                         end repeat
                     end tell
+                    repeat with i from firstFile to (count of argv)
+                        tell content of theDraft
+                            make new attachment with properties {file name:(POSIX file (item i of argv))} at after last paragraph
+                        end tell
+                    end repeat
+                    set wanted to (count of argv) - firstFile + 1
+                    set attachedCount to 0
+                    if wanted > 0 then set attachedCount to count of attachments of content of theDraft
                     activate
+                    if attachedCount is not wanted then return "attached " & attachedCount
                     return "drafted"
                 end tell
             end run

@@ -36,10 +36,19 @@ public extension MailScript {
         ] + recipients))
     }
 
-    /// Asks every account to fetch new mail. The index catches up on Mail's
-    /// own schedule after that.
-    static func checkForNewMail(using runner: AppleScriptRunner) throws {
-        _ = try runner(MailScriptSources.checkForNewMail, [])
+    /// Asks every account to fetch new mail, and synchronises each IMAP
+    /// account with its server. The index catches up on Mail's own schedule
+    /// after that.
+    ///
+    /// - Returns: The names of the accounts synchronised.
+    @discardableResult
+    static func checkForNewMail(using runner: AppleScriptRunner) throws -> [String] {
+        let lines = try runner(MailScriptSources.checkForNewMail, [])
+            .split(whereSeparator: \.isNewline).map(String.init)
+        guard lines.first == "checked" else {
+            throw MailError.scriptFailed("Mail did not confirm it was asked to check for new mail")
+        }
+        return Array(lines.dropFirst())
     }
 
     private static func expectOpened(_ reply: String) throws {

@@ -238,7 +238,7 @@ final class RuleTests: XCTestCase {
                                      to: MailboxReference(accountID: icloud, path: "Receipts/Shop"),
                                      using: recorder.runner)
         let call = try XCTUnwrap(recorder.calls.first)
-        XCTAssertEqual(call.arguments, ["Shop", "shop.example", icloud, "Receipts/Shop", "true"])
+        XCTAssertEqual(call.arguments, ["Shop", "shop.example", icloud, "Receipts/Shop", "", "", "false", "-1", "true"])
         XCTAssertTrue(call.source.contains("enabled:false"), "made off, switched on only after the check")
         XCTAssertTrue(call.source.contains("delete message:false"))
         XCTAssertTrue(call.source.contains("rule type:from header"))
@@ -246,6 +246,49 @@ final class RuleTests: XCTestCase {
         for word in ["forward message:\"", "redirect message:\"", "run script:"] {
             XCTAssertFalse(call.source.contains(word), word)
         }
+    }
+
+    func testARuleCanCopyMarkReadAndFlagButNeedsSomethingToDo() throws {
+        let recorder = Recorder(reply: "added")
+        try MailScript.addRule(name: "Bills", field: .subject, contains: "invoice",
+                               actions: RuleActions(copyTo: .onMyMac("Bills"), markRead: true, flag: .green),
+                               enabled: false, using: recorder.runner)
+        XCTAssertEqual(recorder.calls[0].arguments,
+                       ["Bills", "invoice", "", "", "", "Bills", "true", "3", "false"])
+        let source = recorder.calls[0].source
+        for check in ["(should copy message of r) is not vCopying", "(mark read of r) is not vMarkRead",
+                      "(mark flag index of r) is not vFlagIndex", "(forward message of r) is not \"\"",
+                      "(reply text of r) is not \"\""] {
+            XCTAssertTrue(source.contains(check), "read back: \(check)")
+        }
+        XCTAssertThrowsError(try MailScript.addRule(name: "R", field: .from, contains: "shop", actions: RuleActions(),
+                                                    using: Recorder().runner))
+        XCTAssertThrowsError(try MailScript.addRule(name: "R", field: .from, contains: "shop",
+                                                    actions: RuleActions(copyTo: .onMyMac("Junk")),
+                                                    using: Recorder().runner))
+    }
+
+    func testOnlyARuleThatDoesNothingIrreversibleIsSwitchedOn() throws {
+        let fs = "\u{1F}", rs = "\u{1E}", item = "\u{1D}"
+        let listing = "Safe\(fs)false\(fs)true\(fs)\(fs)move to A\(item)mark read\(item)flag\(item)\(rs)"
+            + "Risky\(fs)false\(fs)true\(fs)\(fs)move to A\(item)forward to x@y\(item)\(rs)"
+        let recorder = Recorder(reply: "done")
+        let runner: AppleScriptRunner = { source, arguments in
+            let reply = try recorder.runner(source, arguments)
+            return source.contains("repeat with r in rules") ? listing : reply
+        }
+        try MailScript.setRuleEnabled(true, name: "Safe", using: runner)
+        XCTAssertEqual(recorder.calls.last?.arguments, ["Safe", "true"])
+        XCTAssertThrowsError(try MailScript.setRuleEnabled(true, name: "Risky", using: runner)) {
+            XCTAssertTrue("\($0)".contains("forward to x@y"), "\($0)")
+        }
+        XCTAssertEqual(recorder.calls.last?.arguments, [], "refused after the listing, before any change")
+        try MailScript.setRuleEnabled(false, name: "Risky", using: runner)
+        XCTAssertEqual(recorder.calls.last?.arguments, ["Risky", "false"], "switching off is always allowed")
+        XCTAssertThrowsError(try MailScript.setRuleEnabled(true, name: "Nobody", using: runner))
+        XCTAssertEqual(RuleSafety.unsafeActions(in: MailRule(name: "x", enabled: false, matchesAll: true,
+            conditions: [], actions: ["delete", "copy to B", "run script", "reply", "redirect to z"])),
+                       ["delete", "run script", "reply", "redirect to z"])
     }
 
     func testAFailedReadBackIsAnError() {
@@ -307,5 +350,53 @@ final class MailboxSpellingTests: XCTestCase {
         XCTAssertTrue(forms.contains("Trips/Hotel (Zürich)"))
         XCTAssertEqual(QueryBuilder.mailboxSpellings("Inbox Test")[1], "Inbox%20Test")
         XCTAssertEqual(Set(QueryBuilder.mailboxSpellings("INBOX")), ["INBOX"])
+    }
+}
+
+final class DraftAndRefreshTests: XCTestCase {
+
+    private func scratch() throws -> URL {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mail-draft-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    func testOnlyOrdinaryVisibleFilesAreAttached() throws {
+        let folder = try scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("p60.pdf")
+        try Data("x".utf8).write(to: file)
+        let hiddenFolder = folder.appendingPathComponent(".ssh")
+        try FileManager.default.createDirectory(at: hiddenFolder, withIntermediateDirectories: true)
+        let key = hiddenFolder.appendingPathComponent("id_ed25519")
+        try Data("k".utf8).write(to: key)
+        let hiddenFile = folder.appendingPathComponent(".env")
+        try Data("e".utf8).write(to: hiddenFile)
+        let link = folder.appendingPathComponent("innocent.pdf")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: key)
+
+        XCTAssertNil(DraftSafety.attachmentProblem(file))
+        XCTAssertNotNil(DraftSafety.attachmentProblem(key))
+        XCTAssertNotNil(DraftSafety.attachmentProblem(hiddenFile))
+        XCTAssertNotNil(DraftSafety.attachmentProblem(link), "a link is judged by where it points")
+        XCTAssertNotNil(DraftSafety.attachmentProblem(folder), "a folder")
+        XCTAssertNotNil(DraftSafety.attachmentProblem(folder.appendingPathComponent("missing.pdf")))
+
+        let recorder = Recorder(reply: "drafted")
+        XCTAssertThrowsError(try MailScript.draft(to: ["a@b.invalid"], subject: "s", body: "b",
+                                                  attachments: [file, key], using: recorder.runner))
+        XCTAssertTrue(recorder.calls.isEmpty, "refused before Mail is asked")
+        try MailScript.draft(to: ["a@b.invalid"], subject: "s", body: "b", attachments: [file], using: recorder.runner)
+        XCTAssertEqual(recorder.calls[0].arguments.last, file.standardizedFileURL.path)
+        XCTAssertFalse(recorder.calls[0].source.contains("p60"), "the path is argv")
+        XCTAssertFalse(recorder.calls[0].source.contains(" send"), "the draft script never sends")
+        XCTAssertThrowsError(try MailScript.draft(to: ["a@b.invalid"], subject: "s", body: "b", attachments: [file],
+                                                  using: Recorder(reply: "attached 0").runner))
+    }
+
+    func testRefreshReportsTheAccountsItSynced() throws {
+        XCTAssertEqual(try MailScript.checkForNewMail(using: Recorder(reply: "checked\niCloud").runner), ["iCloud"])
+        XCTAssertEqual(try MailScript.checkForNewMail(using: Recorder(reply: "checked").runner), [])
+        XCTAssertThrowsError(try MailScript.checkForNewMail(using: Recorder(reply: "").runner))
     }
 }
